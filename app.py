@@ -157,5 +157,10 @@ def submit_customer():
         return jsonify({"message": f"❌ Failed to save appointment. Error: {e}"}), 500
 
 if __name__ == "__main__":
+    # Initialize DB (no-op if exists)
     init_sqlite_db()
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    # Use PORT provided by Render; default to 5000 locally
+    port = int(os.getenv("PORT", "5000"))
+    # Disable debug by default in production
+    debug = os.getenv("FLASK_DEBUG", "0").lower() in ("1", "true", "yes")
+    app.run(host="0.0.0.0", port=port, debug=debug)
