@@ -162,6 +162,22 @@ def submit_customer():
     except Exception as e:
         return jsonify({"message": f"❌ Failed to save appointment. Error: {e}"}), 500
 
+
+# New endpoint: get all customer appointments
+@app.route("/api/appointments", methods=["GET"])
+def get_appointments():
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id, name, email, age, gender, appointment_date, time_slot, created_at FROM customer_appointments ORDER BY created_at DESC")
+        rows = cur.fetchall()
+        appointments = [dict(row) for row in rows]
+        cur.close()
+        conn.close()
+        return jsonify({"appointments": appointments})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == "__main__":
     # Initialize DB (no-op if exists)
     init_sqlite_db()
