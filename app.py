@@ -16,11 +16,17 @@ DB_ENGINE = os.getenv("DB_ENGINE", "sqlite").lower()
 SQLITE_PATH = os.getenv("SQLITE_PATH", os.path.join(ROOT_DIR, "bloodbank.db"))
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+# CORS: allow all in dev, restrict in prod via env FRONTEND_ORIGIN
+frontend_origin = os.getenv("FRONTEND_ORIGIN")
+if frontend_origin:
+    CORS(app, resources={r"/*": {"origins": frontend_origin}}, supports_credentials=True)
+else:
+    CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 app.secret_key = os.getenv("SECRET_KEY", "fallback_secret")
 
 app.config["SESSION_COOKIE_SAMESITE"] = "None"
-app.config["SESSION_COOKIE_SECURE"] = False
+# Secure cookies on Render (when PORT is present) unless explicitly disabled
+app.config["SESSION_COOKIE_SECURE"] = bool(os.getenv("PORT")) and os.getenv("COOKIE_SECURE", "1") not in ("0", "false", "no")
 
 def get_connection():
     conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
