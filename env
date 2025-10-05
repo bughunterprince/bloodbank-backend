@@ -1,0 +1,4 @@
+SENDER_EMAIL=projectbloodmgmt@gmail.com
+SENDER_PASSWORD=yljz jgny nqju dxrp
+SECRET_KEY=your_custom_flask_secret
+GEMINI_API_KEY=AIzaSyBdmRLoYx4G7Azf2ljBceCIUzHLp5caaqU
