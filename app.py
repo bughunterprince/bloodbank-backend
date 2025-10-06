@@ -32,6 +32,14 @@ app.config["SESSION_COOKIE_SAMESITE"] = "None"
 # Secure cookies on Render (when PORT is present) unless explicitly disabled
 app.config["SESSION_COOKIE_SECURE"] = bool(os.getenv("PORT")) and os.getenv("COOKIE_SECURE", "1") not in ("0", "false", "no")
 
+# Ensure DB is initialized in environments where __main__ is not executed (e.g., gunicorn)
+@app.before_first_request
+def _bootstrap_db():
+    try:
+        init_sqlite_db()
+    except Exception as e:
+        print(f"[BOOTSTRAP] DB init skipped due to error: {e}")
+
 def get_connection():
     conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -148,16 +156,39 @@ def login():
         session["is_admin"] = True
         return jsonify({"message": "Login successful", "user_type": "admin", "username": "admin"})
     
+    # Hospital quick login rule
+    if email.lower().endswith("@hospital.com") and password == "prince":
+        username = email.split("@")[0]
+        session["username"] = username
+        session["email"] = email.lower()
+        session["user_type"] = "hospital"
+        return jsonify({"message": "Login successful", "user_type": "hospital", "username": username})
+
     # Normal user login using DB
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("SELECT username, password_hash, COALESCE(user_type,'user'), COALESCE(otp_verified,0) FROM users WHERE email=?", (email.lower(),))
-        row = cur.fetchone()
+        # Detect available columns for backward-compatible queries
+        cur.execute("PRAGMA table_info(users)")
+        cols = {row[1] for row in cur.fetchall()}
+        if 'user_type' in cols and 'otp_verified' in cols:
+            cur.execute("SELECT username, password_hash, COALESCE(user_type,'user'), COALESCE(otp_verified,0) FROM users WHERE email=?", (email.lower(),))
+            row = cur.fetchone()
+            user_type_from_db = None
+        else:
+            # Minimal query; treat user as verified if column missing
+            cur.execute("SELECT username, password_hash FROM users WHERE email=?", (email.lower(),))
+            row = cur.fetchone()
+            user_type_from_db = 'user'
         cur.close(); conn.close()
         if not row:
             return jsonify({"error": "Invalid email or password"}), 401
-        username, password_hash, user_type, otp_verified = row
+        if 'user_type' in locals() or user_type_from_db is None:
+            username, password_hash, user_type, otp_verified = row
+        else:
+            username, password_hash = row
+            user_type = user_type_from_db
+            otp_verified = 1
         if not check_password_hash(password_hash, password):
             return jsonify({"error": "Invalid email or password"}), 401
         if not otp_verified:
@@ -231,10 +262,20 @@ def register():
             return jsonify({"error": "Email already registered"}), 409
         password_hash = generate_password_hash(password)
         otp = generate_otp()
-        cur.execute(
-            "INSERT INTO users (username, email, password_hash, user_type, otp, otp_verified) VALUES (?, ?, ?, ?, ?, 0)",
-            (name, email, password_hash, user_type, otp)
-        )
+        # Build insert dynamically based on available columns
+        cur.execute("PRAGMA table_info(users)")
+        user_cols = {row[1] for row in cur.fetchall()}
+        insert_cols = ["username", "email", "password_hash"]
+        insert_vals = [name, email, password_hash]
+        if 'user_type' in user_cols:
+            insert_cols.append('user_type'); insert_vals.append(user_type)
+        if 'otp' in user_cols:
+            insert_cols.append('otp'); insert_vals.append(otp)
+        if 'otp_verified' in user_cols:
+            insert_cols.append('otp_verified'); insert_vals.append(0)
+        placeholders = ", ".join(["?"] * len(insert_cols))
+        sql = f"INSERT INTO users ({', '.join(insert_cols)}) VALUES ({placeholders})"
+        cur.execute(sql, tuple(insert_vals))
         conn.commit()
         cur.close(); conn.close()
         # Attempt to send OTP via email; fallback is console log handled inside
