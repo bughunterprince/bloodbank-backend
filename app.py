@@ -4,6 +4,7 @@ from flask_cors import CORS
 import os
 import sqlite3
 from dotenv import load_dotenv
+import random
 
 # Bootstrap
 load_dotenv()
@@ -39,12 +40,16 @@ def adapt_query(query: str) -> str:
 def init_sqlite_db():
     conn = get_connection()
     cur = conn.cursor()
+    # Create tables if they don't exist
     cur.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT NOT NULL,
             email TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
+            user_type TEXT,
+            otp TEXT,
+            otp_verified INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS customer_appointments (
@@ -78,6 +83,18 @@ def init_sqlite_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
+    # Lightweight migrations for existing DBs
+    try:
+        cur.execute("PRAGMA table_info(users)")
+        cols = {row[1] for row in cur.fetchall()}
+        if 'user_type' not in cols:
+            cur.execute("ALTER TABLE users ADD COLUMN user_type TEXT")
+        if 'otp' not in cols:
+            cur.execute("ALTER TABLE users ADD COLUMN otp TEXT")
+        if 'otp_verified' not in cols:
+            cur.execute("ALTER TABLE users ADD COLUMN otp_verified INTEGER DEFAULT 0")
+    except Exception as e:
+        print(f"[DB MIGRATION] {e}")
     conn.commit()
     cur.close()
     conn.close()
@@ -88,7 +105,16 @@ def root():
         "message": "Blood Bank Management API",
         "status": "running",
         "version": "1.0.0",
-        "endpoints": ["/api/health", "/api/login", "/api/logout", "/api/user", "/api/submit-customer"]
+        "endpoints": [
+            "/api/health",
+            "/api/login",
+            "/api/logout",
+            "/api/user",
+            "/api/register",
+            "/api/verify-otp",
+            "/api/submit-customer",
+            "/api/appointments"
+        ]
     })
 
 @app.route("/api/health")
@@ -119,7 +145,85 @@ def login():
         session["is_admin"] = True
         return jsonify({"message": "Login successful", "user_type": "admin", "username": "admin"})
     
-    return jsonify({"error": "Invalid email or password"}), 401
+    # Normal user login using DB
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT username, password_hash, COALESCE(user_type,'user'), COALESCE(otp_verified,0) FROM users WHERE email=?", (email.lower(),))
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        if not row:
+            return jsonify({"error": "Invalid email or password"}), 401
+        username, password_hash, user_type, otp_verified = row
+        if not check_password_hash(password_hash, password):
+            return jsonify({"error": "Invalid email or password"}), 401
+        if not otp_verified:
+            return jsonify({"error": "Email not verified. Please verify OTP."}), 403
+        session["username"] = username
+        session["email"] = email.lower()
+        session["user_type"] = user_type
+        return jsonify({"message": "Login successful", "user_type": user_type, "username": username})
+    except Exception as e:
+        return jsonify({"error": f"Login failed: {e}"}), 500
+
+# Helpers for registration/OTP
+def generate_otp():
+    return str(random.randint(100000, 999999))
+
+@app.route("/api/register", methods=["POST"])
+def register():
+    data = request.get_json()
+    name = (data.get("name") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    user_type = (data.get("user_type") or "user").strip().lower()
+    if not all([name, email, password]):
+        return jsonify({"error": "All fields required"}), 400
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE email=?", (email,))
+        if cur.fetchone():
+            cur.close(); conn.close()
+            return jsonify({"error": "Email already registered"}), 409
+        password_hash = generate_password_hash(password)
+        otp = generate_otp()
+        cur.execute(
+            "INSERT INTO users (username, email, password_hash, user_type, otp, otp_verified) VALUES (?, ?, ?, ?, ?, 0)",
+            (name, email, password_hash, user_type, otp)
+        )
+        conn.commit()
+        cur.close(); conn.close()
+        print(f"[OTP] Registration OTP for {email}: {otp}")
+        return jsonify({"message": "Registered! OTP sent (check logs)", "email": email})
+    except Exception as e:
+        return jsonify({"error": f"Registration failed: {e}"}), 500
+
+@app.route("/api/verify-otp", methods=["POST"])
+def verify_otp():
+    data = request.get_json()
+    email = (data.get("email") or "").strip().lower()
+    otp = (data.get("otp") or "").strip()
+    if not email or not otp:
+        return jsonify({"error": "Email and OTP required"}), 400
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id, otp FROM users WHERE email=?", (email,))
+        row = cur.fetchone()
+        if not row:
+            cur.close(); conn.close()
+            return jsonify({"error": "User not found"}), 404
+        uid, saved_otp = row
+        if not saved_otp or saved_otp != otp:
+            cur.close(); conn.close()
+            return jsonify({"error": "Invalid OTP"}), 400
+        cur.execute("UPDATE users SET otp_verified=1, otp=NULL WHERE id=?", (uid,))
+        conn.commit()
+        cur.close(); conn.close()
+        return jsonify({"message": "OTP verified successfully"})
+    except Exception as e:
+        return jsonify({"error": f"Verification failed: {e}"}), 500
 
 @app.route("/api/logout", methods=["POST"])
 def logout():
