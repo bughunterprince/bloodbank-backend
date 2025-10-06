@@ -32,13 +32,7 @@ app.config["SESSION_COOKIE_SAMESITE"] = "None"
 # Secure cookies on Render (when PORT is present) unless explicitly disabled
 app.config["SESSION_COOKIE_SECURE"] = bool(os.getenv("PORT")) and os.getenv("COOKIE_SECURE", "1") not in ("0", "false", "no")
 
-# Ensure DB is initialized in environments where __main__ is not executed (e.g., gunicorn)
-@app.before_first_request
-def _bootstrap_db():
-    try:
-        init_sqlite_db()
-    except Exception as e:
-        print(f"[BOOTSTRAP] DB init skipped due to error: {e}")
+# (Import-time DB init will be added after the function definition)
 
 def get_connection():
     conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
@@ -109,6 +103,12 @@ def init_sqlite_db():
     conn.commit()
     cur.close()
     conn.close()
+
+# Ensure DB is initialized even when running under gunicorn (Flask 3 removed before_first_request)
+try:
+    init_sqlite_db()
+except Exception as e:
+    print(f"[BOOTSTRAP] DB init skipped due to error: {e}")
 
 @app.route("/")
 def root():
