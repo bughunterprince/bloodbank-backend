@@ -5,6 +5,9 @@ import os
 import sqlite3
 from dotenv import load_dotenv
 import random
+import smtplib
+from email.mime.text import MIMEText
+from email.utils import formataddr
 
 # Bootstrap
 load_dotenv()
@@ -170,13 +173,53 @@ def login():
 def generate_otp():
     return str(random.randint(100000, 999999))
 
+def send_otp_email(to_email: str, name: str, otp: str) -> bool:
+    """Send OTP to user's email using SMTP.
+    Returns True if sent, False otherwise.
+    Uses env SENDER_EMAIL and SENDER_PASSWORD. Falls back to console print when missing/failing.
+    """
+    sender = os.getenv("SENDER_EMAIL")
+    password = os.getenv("SENDER_PASSWORD")
+    if not sender or not password:
+        # Fallback: no credentials configured
+        print(f"[OTP:FALLBACK] OTP for {to_email}: {otp}")
+        return False
+
+    try:
+        clean_password = password.replace(" ", "")
+        display_name = os.getenv("SENDER_NAME", "Blood Bank Service")
+        subject = "Your OTP for Blood Bank Account"
+        body = (
+            f"Hi {name or 'there'},\n\n"
+            f"Use this One-Time Password to verify your email: {otp}\n\n"
+            "This code will expire soon. If you didn't try to sign up, you can ignore this email.\n\n"
+            "— Blood Bank Team"
+        )
+        msg = MIMEText(body, _charset="utf-8")
+        msg["From"] = formataddr((display_name, sender))
+        msg["To"] = to_email
+        msg["Subject"] = subject
+
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(sender, clean_password)
+            server.sendmail(sender, [to_email], msg.as_string())
+        print(f"[OTP:EMAIL] Sent OTP to {to_email}")
+        return True
+    except Exception as e:
+        print(f"[OTP:EMAIL:ERROR] Could not send email to {to_email}: {e}")
+        print(f"[OTP:FALLBACK] OTP for {to_email}: {otp}")
+        return False
+
 @app.route("/api/register", methods=["POST"])
 def register():
     data = request.get_json()
     name = (data.get("name") or "").strip()
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
-    user_type = (data.get("user_type") or "user").strip().lower()
+    # Force simple user signups only; ignore incoming user_type
+    user_type = "user"
     if not all([name, email, password]):
         return jsonify({"error": "All fields required"}), 400
     try:
@@ -194,8 +237,10 @@ def register():
         )
         conn.commit()
         cur.close(); conn.close()
-        print(f"[OTP] Registration OTP for {email}: {otp}")
-        return jsonify({"message": "Registered! OTP sent (check logs)", "email": email})
+        # Attempt to send OTP via email; fallback is console log handled inside
+        sent = send_otp_email(email, name, otp)
+        msg = "Registered! OTP sent to your email" if sent else "Registered! OTP sent (check logs)"
+        return jsonify({"message": msg, "email": email})
     except Exception as e:
         return jsonify({"error": f"Registration failed: {e}"}), 500
 
