@@ -205,42 +205,68 @@ def generate_otp():
     return str(random.randint(100000, 999999))
 
 def send_otp_email(to_email: str, name: str, otp: str) -> bool:
-    """Send OTP to user's email using SMTP.
-    Returns True if sent, False otherwise.
-    Uses env SENDER_EMAIL and SENDER_PASSWORD. Falls back to console print when missing/failing.
-    """
+    """Send OTP to user's email using SMTP with detailed debugging."""
     sender = os.getenv("SENDER_EMAIL")
     password = os.getenv("SENDER_PASSWORD")
+    
+    print(f"[DEBUG] Attempting to send OTP to: {to_email}")
+    print(f"[DEBUG] SMTP Config - Sender: {sender}")
+    print(f"[DEBUG] Password configured: {bool(password)}")
+    
     if not sender or not password:
-        # Fallback: no credentials configured
-        print(f"[OTP:FALLBACK] OTP for {to_email}: {otp}")
+        print(f"[ERROR] Missing SMTP credentials - sender: {bool(sender)}, password: {bool(password)}")
         return False
 
     try:
-        clean_password = password.replace(" ", "")
+        # Clean password (remove spaces)
+        clean_password = password.replace(" ", "").strip()
+        print(f"[DEBUG] Password length after cleaning: {len(clean_password)}")
+        
         display_name = os.getenv("SENDER_NAME", "Blood Bank Service")
         subject = "Your OTP for Blood Bank Account"
         body = (
             f"Hi {name or 'there'},\n\n"
-            f"Use this One-Time Password to verify your email: {otp}\n\n"
-            "This code will expire soon. If you didn't try to sign up, you can ignore this email.\n\n"
+            f"Your One-Time Password is: {otp}\n\n"
+            "Use this code to verify your email address.\n"
+            "This code will expire in 10 minutes.\n\n"
+            "If you didn't request this, please ignore this email.\n\n"
             "— Blood Bank Team"
         )
+        
         msg = MIMEText(body, _charset="utf-8")
         msg["From"] = formataddr((display_name, sender))
         msg["To"] = to_email
         msg["Subject"] = subject
 
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as server:
+        print(f"[DEBUG] Connecting to Gmail SMTP...")
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+            server.set_debuglevel(1)  # Enable SMTP debug output
+            print(f"[DEBUG] Connected, starting TLS...")
             server.ehlo()
             server.starttls()
+            server.ehlo()
+            
+            print(f"[DEBUG] Logging in with user: {sender}")
             server.login(sender, clean_password)
+            
+            print(f"[DEBUG] Sending email...")
             server.sendmail(sender, [to_email], msg.as_string())
-        print(f"[OTP:EMAIL] Sent OTP to {to_email}")
+            
+        print(f"[SUCCESS] OTP email sent successfully to {to_email}")
         return True
+        
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"[ERROR] SMTP Authentication failed: {e}")
+        print(f"[HINT] Check if 2-Step Verification is enabled and App Password is correct")
+        return False
+    except smtplib.SMTPRecipientsRefused as e:
+        print(f"[ERROR] Recipient refused: {e}")
+        return False
+    except smtplib.SMTPServerDisconnected as e:
+        print(f"[ERROR] SMTP server disconnected: {e}")
+        return False
     except Exception as e:
-        print(f"[OTP:EMAIL:ERROR] Could not send email to {to_email}: {e}")
-        print(f"[OTP:FALLBACK] OTP for {to_email}: {otp}")
+        print(f"[ERROR] Unexpected SMTP error: {type(e).__name__}: {e}")
         return False
 
 @app.route("/api/register", methods=["POST"])
@@ -278,10 +304,14 @@ def register():
         cur.execute(sql, tuple(insert_vals))
         conn.commit()
         cur.close(); conn.close()
-        # Attempt to send OTP via email; fallback is console log handled inside
+        # Send OTP via email - must succeed or registration fails
+        print(f"[REGISTER] Attempting to send OTP to {email}")
         sent = send_otp_email(email, name, otp)
-        msg = "Registered! OTP sent to your email" if sent else "Registered! OTP sent (check logs)"
-        return jsonify({"message": msg, "email": email})
+        if not sent:
+            cur.close(); conn.close()
+            return jsonify({"error": "Failed to send OTP email. Please check your email address or try again later."}), 500
+        
+        return jsonify({"message": "Registration successful! Check your email for OTP.", "email": email})
     except Exception as e:
         return jsonify({"error": f"Registration failed: {e}"}), 500
 
@@ -367,6 +397,36 @@ def get_appointments():
         return jsonify({"appointments": appointments})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/smtp-status", methods=["GET"])
+def smtp_status():
+    """Check SMTP configuration status"""
+    sender = os.getenv("SENDER_EMAIL")
+    password = os.getenv("SENDER_PASSWORD")
+    return jsonify({
+        "sender_configured": bool(sender),
+        "password_configured": bool(password),
+        "sender_email": sender or "Not set",
+        "password_length": len(password) if password else 0
+    })
+
+@app.route("/api/test-otp", methods=["POST"])
+def test_otp():
+    """Test OTP sending to a specific email"""
+    data = request.get_json()
+    test_email = data.get("email") if data else None
+    
+    if not test_email:
+        return jsonify({"error": "Email required"}), 400
+    
+    test_otp = generate_otp()
+    success = send_otp_email(test_email, "Test User", test_otp)
+    
+    return jsonify({
+        "success": success,
+        "message": "OTP sent successfully" if success else "Failed to send OTP",
+        "test_email": test_email
+    })
 
 if __name__ == "__main__":
     # Initialize DB (no-op if exists)
