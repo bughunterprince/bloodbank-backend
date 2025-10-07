@@ -8,6 +8,8 @@ import random
 import smtplib
 from email.mime.text import MIMEText
 from email.utils import formataddr
+import requests
+import traceback
 
 # Bootstrap
 load_dotenv()
@@ -204,15 +206,92 @@ def login():
 def generate_otp():
     return str(random.randint(100000, 999999))
 
+def _email_subject_body(name: str, otp: str):
+    subject = "Your OTP for Blood Bank Account"
+    body = (
+        f"Hi {name or 'there'},\n\n"
+        f"Your One-Time Password is: {otp}\n\n"
+        "Use this code to verify your email address.\n"
+        "This code will expire in 10 minutes.\n\n"
+        "If you didn't request this, please ignore this email.\n\n"
+        "— Blood Bank Team"
+    )
+    return subject, body
+
+def _send_via_sendgrid(to_email: str, name: str, otp: str) -> bool:
+    api_key = os.getenv("SENDGRID_API_KEY")
+    sender = os.getenv("SENDER_EMAIL") or os.getenv("SMTP_FROM")
+    if not api_key or not sender:
+        return False
+    subject, body = _email_subject_body(name, otp)
+    try:
+        resp = requests.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "personalizations": [{"to": [{"email": to_email}]}],
+                "from": {"email": sender, "name": os.getenv("SENDER_NAME", "Blood Bank Service")},
+                "subject": subject,
+                "content": [{"type": "text/plain", "value": body}],
+            },
+            timeout=12,
+        )
+        if resp.status_code in (200, 202):
+            print(f"[EMAIL] SendGrid accepted mail to {to_email}")
+            return True
+        print(f"[EMAIL] SendGrid error {resp.status_code}: {resp.text[:200]}")
+        return False
+    except Exception as e:
+        print(f"[EMAIL] SendGrid exception: {type(e).__name__}: {e}")
+        return False
+
+def _send_via_resend(to_email: str, name: str, otp: str) -> bool:
+    api_key = os.getenv("RESEND_API_KEY")
+    sender = os.getenv("RESEND_FROM") or os.getenv("SENDER_EMAIL") or os.getenv("SMTP_FROM")
+    if not api_key or not sender:
+        return False
+    subject, body = _email_subject_body(name, otp)
+    try:
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": sender,
+                "to": [to_email],
+                "subject": subject,
+                "text": body,
+            },
+            timeout=12,
+        )
+        if resp.status_code in (200, 201):
+            print(f"[EMAIL] Resend accepted mail to {to_email}")
+            return True
+        print(f"[EMAIL] Resend error {resp.status_code}: {resp.text[:200]}")
+        return False
+    except Exception as e:
+        print(f"[EMAIL] Resend exception: {type(e).__name__}: {e}")
+        return False
+
 def send_otp_email(to_email: str, name: str, otp: str) -> bool:
-    """Send OTP to user's email using SMTP with detailed debugging."""
+    """Send OTP email using available provider: SendGrid > Resend > SMTP (Gmail)."""
+    print(f"[DEBUG] Attempting to send OTP to: {to_email}")
+    # Prefer API providers to avoid SMTP egress restrictions
+    if _send_via_sendgrid(to_email, name, otp):
+        return True
+    if _send_via_resend(to_email, name, otp):
+        return True
+
+    # SMTP fallback (Gmail or custom SMTP)
     sender = os.getenv("SENDER_EMAIL")
     password = os.getenv("SENDER_PASSWORD")
-    
-    print(f"[DEBUG] Attempting to send OTP to: {to_email}")
     print(f"[DEBUG] SMTP Config - Sender: {sender}")
     print(f"[DEBUG] Password configured: {bool(password)}")
-    
     if not sender or not password:
         print(f"[ERROR] Missing SMTP credentials - sender: {bool(sender)}, password: {bool(password)}")
         return False
@@ -221,30 +300,23 @@ def send_otp_email(to_email: str, name: str, otp: str) -> bool:
         # Clean password (remove spaces)
         clean_password = password.replace(" ", "").strip()
         print(f"[DEBUG] Password length after cleaning: {len(clean_password)}")
-        
         display_name = os.getenv("SENDER_NAME", "Blood Bank Service")
-        subject = "Your OTP for Blood Bank Account"
-        body = (
-            f"Hi {name or 'there'},\n\n"
-            f"Your One-Time Password is: {otp}\n\n"
-            "Use this code to verify your email address.\n"
-            "This code will expire in 10 minutes.\n\n"
-            "If you didn't request this, please ignore this email.\n\n"
-            "— Blood Bank Team"
-        )
-        
+        subject, body = _email_subject_body(name, otp)
         msg = MIMEText(body, _charset="utf-8")
         msg["From"] = formataddr((display_name, sender))
         msg["To"] = to_email
         msg["Subject"] = subject
 
-        print(f"[DEBUG] Connecting to Gmail SMTP...")
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+        smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+        smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        print(f"[DEBUG] Connecting to SMTP {smtp_host}:{smtp_port} ...")
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
             server.set_debuglevel(1)  # Enable SMTP debug output
-            print(f"[DEBUG] Connected, starting TLS...")
             server.ehlo()
-            server.starttls()
-            server.ehlo()
+            if str(os.getenv("SMTP_USE_TLS", "1")).lower() not in ("0", "false", "no"):
+                print(f"[DEBUG] Starting TLS...")
+                server.starttls()
+                server.ehlo()
             
             print(f"[DEBUG] Logging in with user: {sender}")
             server.login(sender, clean_password)
@@ -267,6 +339,7 @@ def send_otp_email(to_email: str, name: str, otp: str) -> bool:
         return False
     except Exception as e:
         print(f"[ERROR] Unexpected SMTP error: {type(e).__name__}: {e}")
+        traceback.print_exc()
         return False
 
 @app.route("/api/register", methods=["POST"])
