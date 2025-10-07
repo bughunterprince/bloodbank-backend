@@ -280,22 +280,29 @@ def _send_via_resend(to_email: str, name: str, otp: str) -> bool:
         return False
 
 def send_otp_email(to_email: str, name: str, otp: str) -> bool:
-    """Send OTP email. Try SMTP (SSL 465) → SMTP (STARTTLS 587). API providers are used only if configured."""
+    """Send OTP via HTTP API (SendGrid/Resend preferred) or SMTP fallback."""
     print(f"[DEBUG] Attempting to send OTP to: {to_email}")
-    # SMTP (preferred for your setup)
+    
+    # TRY HTTP APIs FIRST (Render blocks SMTP ports)
+    if _send_via_sendgrid(to_email, name, otp):
+        return True
+    if _send_via_resend(to_email, name, otp):
+        return True
+    
+    # SMTP fallback (only works locally, not on Render)
     sender = os.getenv("SENDER_EMAIL")
     password = os.getenv("SENDER_PASSWORD")
     print(f"[DEBUG] SMTP Config - Sender: {sender}")
     print(f"[DEBUG] Password configured: {bool(password)}")
     if not sender or not password:
-        print(f"[ERROR] Missing SMTP credentials - sender: {bool(sender)}, password: {bool(password)}")
-        # As a last resort, try API providers if present
-        if _send_via_sendgrid(to_email, name, otp) or _send_via_resend(to_email, name, otp):
-            return True
+        print(f"[ERROR] No email provider configured. Set SENDGRID_API_KEY or SENDER_EMAIL+SENDER_PASSWORD")
+        return False
+    if not sender or not password:
+        print(f"[ERROR] No email provider configured. Set SENDGRID_API_KEY or SENDER_EMAIL+SENDER_PASSWORD")
         return False
 
     try:
-        # Clean password (remove spaces)
+        # Gmail SMTP (blocked on Render, works locally only)
         clean_password = password.replace(" ", "").strip()
         print(f"[DEBUG] Password length after cleaning: {len(clean_password)}")
         display_name = os.getenv("SENDER_NAME", "Blood Bank Service")
@@ -343,6 +350,21 @@ def send_otp_email(to_email: str, name: str, otp: str) -> bool:
         # If both SMTP attempts fail, try providers only if keys are present
         if _send_via_sendgrid(to_email, name, otp) or _send_via_resend(to_email, name, otp):
             return True
+        return False
+        
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"[ERROR] SMTP Authentication failed: {e}")
+        print(f"[HINT] Check if 2-Step Verification is enabled and App Password is correct")
+        return False
+    except smtplib.SMTPRecipientsRefused as e:
+        print(f"[ERROR] Recipient refused: {e}")
+        return False
+    except smtplib.SMTPServerDisconnected as e:
+        print(f"[ERROR] SMTP server disconnected: {e}")
+        return False
+    except Exception as e:
+        print(f"[ERROR] Unexpected SMTP error: {type(e).__name__}: {e}")
+        traceback.print_exc()
         return False
         
     except smtplib.SMTPAuthenticationError as e:
