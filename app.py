@@ -10,6 +10,7 @@ from email.mime.text import MIMEText
 from email.utils import formataddr
 import requests
 import traceback
+import ssl
 
 # Bootstrap
 load_dotenv()
@@ -279,21 +280,18 @@ def _send_via_resend(to_email: str, name: str, otp: str) -> bool:
         return False
 
 def send_otp_email(to_email: str, name: str, otp: str) -> bool:
-    """Send OTP email using available provider: SendGrid > Resend > SMTP (Gmail)."""
+    """Send OTP email. Try SMTP (SSL 465) → SMTP (STARTTLS 587). API providers are used only if configured."""
     print(f"[DEBUG] Attempting to send OTP to: {to_email}")
-    # Prefer API providers to avoid SMTP egress restrictions
-    if _send_via_sendgrid(to_email, name, otp):
-        return True
-    if _send_via_resend(to_email, name, otp):
-        return True
-
-    # SMTP fallback (Gmail or custom SMTP)
+    # SMTP (preferred for your setup)
     sender = os.getenv("SENDER_EMAIL")
     password = os.getenv("SENDER_PASSWORD")
     print(f"[DEBUG] SMTP Config - Sender: {sender}")
     print(f"[DEBUG] Password configured: {bool(password)}")
     if not sender or not password:
         print(f"[ERROR] Missing SMTP credentials - sender: {bool(sender)}, password: {bool(password)}")
+        # As a last resort, try API providers if present
+        if _send_via_sendgrid(to_email, name, otp) or _send_via_resend(to_email, name, otp):
+            return True
         return False
 
     try:
@@ -308,24 +306,44 @@ def send_otp_email(to_email: str, name: str, otp: str) -> bool:
         msg["Subject"] = subject
 
         smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
-        smtp_port = int(os.getenv("SMTP_PORT", "587"))
-        print(f"[DEBUG] Connecting to SMTP {smtp_host}:{smtp_port} ...")
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
-            server.set_debuglevel(1)  # Enable SMTP debug output
-            server.ehlo()
-            if str(os.getenv("SMTP_USE_TLS", "1")).lower() not in ("0", "false", "no"):
-                print(f"[DEBUG] Starting TLS...")
-                server.starttls()
+        # 1) Try SMTPS (SSL) on 465
+        try:
+            ssl_port = int(os.getenv("SMTP_SSL_PORT", "465"))
+            print(f"[DEBUG] Connecting via SMTP_SSL {smtp_host}:{ssl_port} ...")
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(smtp_host, ssl_port, context=context, timeout=12) as server:
                 server.ehlo()
-            
-            print(f"[DEBUG] Logging in with user: {sender}")
-            server.login(sender, clean_password)
-            
-            print(f"[DEBUG] Sending email...")
-            server.sendmail(sender, [to_email], msg.as_string())
-            
-        print(f"[SUCCESS] OTP email sent successfully to {to_email}")
-        return True
+                print(f"[DEBUG] Logging in (SSL) with user: {sender}")
+                server.login(sender, clean_password)
+                print(f"[DEBUG] Sending email (SSL)...")
+                server.sendmail(sender, [to_email], msg.as_string())
+            print(f"[SUCCESS] OTP email sent via SSL to {to_email}")
+            return True
+        except Exception as e_ssl:
+            print(f"[WARN] SMTP_SSL failed: {type(e_ssl).__name__}: {e_ssl}")
+
+        # 2) Fallback to STARTTLS on 587
+        try:
+            tls_port = int(os.getenv("SMTP_PORT", "587"))
+            print(f"[DEBUG] Connecting via SMTP {smtp_host}:{tls_port} (STARTTLS) ...")
+            with smtplib.SMTP(smtp_host, tls_port, timeout=15) as server:
+                server.ehlo()
+                print(f"[DEBUG] Starting TLS...")
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
+                print(f"[DEBUG] Logging in (TLS) with user: {sender}")
+                server.login(sender, clean_password)
+                print(f"[DEBUG] Sending email (TLS)...")
+                server.sendmail(sender, [to_email], msg.as_string())
+            print(f"[SUCCESS] OTP email sent via STARTTLS to {to_email}")
+            return True
+        except Exception as e_tls:
+            print(f"[WARN] SMTP STARTTLS failed: {type(e_tls).__name__}: {e_tls}")
+
+        # If both SMTP attempts fail, try providers only if keys are present
+        if _send_via_sendgrid(to_email, name, otp) or _send_via_resend(to_email, name, otp):
+            return True
+        return False
         
     except smtplib.SMTPAuthenticationError as e:
         print(f"[ERROR] SMTP Authentication failed: {e}")
